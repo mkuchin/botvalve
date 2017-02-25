@@ -9,9 +9,9 @@ import org.apache.juli.logging.LogFactory;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletResponse;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.Writer;
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -29,6 +29,8 @@ public class BotValve extends ValveBase {
     private TimeUnit unit = TimeUnit.SECONDS;
     private int expiry = 5 * 60 * MILLIS_IN_SEC;
     private int threshold = 100;
+    private String pushKey;
+    private String pushTitle;
     private long lastClean;
     private long cleanIpsTimeout = 30 * 60 * MILLIS_IN_SEC;
 
@@ -67,7 +69,8 @@ public class BotValve extends ValveBase {
             }
         }
         counter.hit();
-        if (counter.getSize() > threshold) {
+        if (counter.getSize() > threshold && !blocked.contains(ip)) {
+            pushNotification(ip);
             blocked.put(ip, System.currentTimeMillis());
             log.error("Blocked: " + ip);
             if (enabled)
@@ -76,11 +79,30 @@ public class BotValve extends ValveBase {
         getNext().invoke(request, response);
     }
 
+    private void pushNotification(String ip) {
+        if(pushKey != null) {
+            HttpURLConnection con = null;
+            try {
+                URL obj = new URL(String.format("https://api.simplepush.io/send/%s/%s/%s", pushKey, pushTitle, "Blocked: " + ip));
+                 con = (HttpURLConnection) obj.openConnection();
+                int responseCode = con.getResponseCode();
+                if(responseCode != HttpServletResponse.SC_OK)
+                    log.error("Error pushing notification, response code: " + responseCode);
+            } catch (Exception e) {
+                log.error("Excepiton pushing notification", e);
+            } finally {
+                if(con!=null)
+                    con.disconnect();
+            }
+
+        }
+    }
+
     private void handleApi(Request request, Response response) throws IOException {
         String uri = request.getRequestURI();
-        log.info("Api request: " + uri);
+        log.debug("Api request: " + uri);
         String action = uri.substring(uri.indexOf(API_PREFIX) + API_PREFIX_LEN);
-        log.info("Api action: " + action);
+        log.debug("Api action: " + action);
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType("text/plain");
         Writer writer = response.getWriter();
@@ -174,6 +196,14 @@ public class BotValve extends ValveBase {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public void setPushKey(String pushKey) {
+        this.pushKey = pushKey;
+    }
+
+    public void setPushTitle(String pushTitle) {
+        this.pushTitle = pushTitle;
     }
 
     @Override
