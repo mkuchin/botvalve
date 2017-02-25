@@ -10,64 +10,142 @@ import org.apache.juli.logging.LogFactory;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.Set;
+import java.io.PrintWriter;
+import java.io.Writer;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 public class BotValve extends ValveBase {
-    private static final Log log =LogFactory.getLog(BotValve.class);
+    private static final Log log = LogFactory.getLog(BotValve.class);
     private static final int NANOS_IN_MILLIS = 1_000_000;
+    private static final int MILLIS_IN_SEC = 1_000;
+    private static final String API_PREFIX = "/botvalve/";
+    private static final int API_PREFIX_LEN = API_PREFIX.length();
     private ConcurrentHashMap<String, RequestCounter> counters;
     private ConcurrentHashMap<String, Long> blocked;
+    private boolean enabled = true;
     private int period = 60;
-    private String unit = TimeUnit.SECONDS.name();
-    private int expiry = 5 * 60 * 1000;
+    private TimeUnit unit = TimeUnit.SECONDS;
+    private int expiry = 5 * 60 * MILLIS_IN_SEC;
     private int threshold = 100;
     private long lastClean;
-    private final long cleanIpsTimeout = 30 * 60 * 1000;
+    private long cleanIpsTimeout = 30 * 60 * MILLIS_IN_SEC;
 
     public BotValve() {
         super();
-        this.counters = new ConcurrentHashMap<>(10000, 0.9f, 4);
-        this.blocked = new ConcurrentHashMap<>(10, 0.9f, 1);
-        this.lastClean = System.currentTimeMillis();
+        reset();
     }
 
     @Override
     protected synchronized void startInternal() throws LifecycleException {
         super.startInternal();
-        containerLog.info("BotValve started");
-        containerLog.info("Expiry: " + expiry);
-        containerLog.info("Threshold: " + threshold);
+        log.info("BotValve started");
+        log.info("Period: " + period + " " + unit.name());
+        log.info("Block threshold: " + threshold);
+        log.info("Expiry: " + expiry);
+        log.info("Clean IP timeout: " + cleanIpsTimeout);
     }
 
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
         String ip = request.getRemoteAddr();
-        if(blocked.get(ip) != null) {
+        if (enabled && blocked.get(ip) != null) {
             deny(ip, request, response);
             return;
         }
+        if (request.getRequestURI().startsWith(API_PREFIX)) {
+            handleApi(request, response);
+            return;
+        }
         RequestCounter counter = counters.get(ip);
-        if(counter == null) {
+        if (counter == null) {
             counter = createCounter();
             RequestCounter oldCounter = counters.putIfAbsent(ip, counter);
-            if(oldCounter != null) {
+            if (oldCounter != null) {
                 counter = oldCounter;
             }
         }
         counter.hit();
-        if(counter.getSize() > threshold) {
+        if (counter.getSize() > threshold) {
             blocked.put(ip, System.currentTimeMillis());
-            containerLog.error("Blocked: " + ip);
-            deny(ip, request, response);
+            log.error("Blocked: " + ip);
+            if (enabled)
+                deny(ip, request, response);
         }
         getNext().invoke(request, response);
+    }
+
+    private void handleApi(Request request, Response response) throws IOException {
+        String uri = request.getRequestURI();
+        log.info("Api request: " + uri);
+        String action = uri.substring(uri.indexOf(API_PREFIX) + API_PREFIX_LEN);
+        log.info("Api action: " + action);
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType("text/plain");
+        Writer writer = response.getWriter();
+        PrintWriter out = new PrintWriter(writer);
+        out.println("botValve API");
+        switch (action) {
+            case "":
+                out.println("Actions: /status, /reset, /enable, /disable");
+                break;
+            case "disable":
+                enabled = false;
+                out.println("ok");
+                break;
+            case "enable":
+                enabled = true;
+                out.println("ok");
+                break;
+            case "reset":
+                reset();
+                out.println("ok");
+                break;
+            case "status":
+                out.println("Blocked ips:");
+                long time = System.currentTimeMillis();
+                for (String ip : blocked.keySet()) {
+                    out.printf("%16s - %5s sec\n", ip, (time - blocked.get(ip)) / MILLIS_IN_SEC);
+                }
+                PriorityQueue<Map.Entry<String, RequestCounter>> queue = new PriorityQueue<>(new Comparator<Map.Entry<String, RequestCounter>>() {
+                    @Override
+                    public int compare(Map.Entry<String, RequestCounter> o1, Map.Entry<String, RequestCounter> o2) {
+                        return o2.getValue().getSize() - o1.getValue().getSize();
+                    }
+                });
+                Set<Map.Entry<String, RequestCounter>> counterEntries = counters.entrySet();
+                out.println("uniq ips: " + counterEntries.size());
+                queue.addAll(counterEntries);
+                out.println("Top ips:");
+                for (int i = 0; i < 20; i++) {
+                    Map.Entry<String, RequestCounter> entry = queue.poll();
+                    if (entry == null)
+                        break;
+                    out.printf("%16s  %5s\n", entry.getKey(), entry.getValue().getSize());
+                }
+
+                break;
+        /*   "set":
+                String name = request.
+                break;
+            */
+            default:
+                writer.write("Unrecognized action");
+        }
+
+        writer.flush();
 
     }
 
+    private void reset() {
+        this.counters = new ConcurrentHashMap<>(10000, 0.9f, 4);
+        this.blocked = new ConcurrentHashMap<>(10, 0.9f, 1);
+        this.lastClean = System.currentTimeMillis();
+    }
+
     private RequestCounter createCounter() {
-        return new RequestCounter(period, TimeUnit.valueOf(unit));
+        return new RequestCounter(period, unit);
     }
 
     private void deny(String ip, Request request, Response response) {
@@ -79,40 +157,48 @@ public class BotValve extends ValveBase {
     }
 
     public void setUnit(String unit) {
-        this.unit = unit;
+        this.unit = TimeUnit.valueOf(unit);
     }
 
     public void setExpiry(int expiry) {
-        log.info("setExpiry:" + expiry);
-        this.expiry = expiry;
+        this.expiry = expiry * MILLIS_IN_SEC;
     }
 
     public void setThreshold(int threshold) {
         this.threshold = threshold;
     }
 
+    public void setCleanIpsTimeout(long cleanIpsTimeout) {
+        this.cleanIpsTimeout = cleanIpsTimeout * MILLIS_IN_SEC;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
     @Override
     public void backgroundProcess() {
         Set<String> keySet = blocked.keySet();
         long time = System.currentTimeMillis();
-        for(String ip: keySet) {
-           if(time - blocked.get(ip) > expiry) {
-               containerLog.warn("Expired block: " + ip);
-               blocked.remove(ip);
-           }
+        for (String ip : keySet) {
+            if (time - blocked.get(ip) > expiry) {
+                log.warn("Expired block: " + ip);
+                blocked.remove(ip);
+            }
         }
-        if(time - lastClean > cleanIpsTimeout) {
+        if (time - lastClean > cleanIpsTimeout) {
             lastClean = time;
-            containerLog.warn("Cleaning IPs, initial size=" + counters.size());
+            log.warn("Cleaning IPs, initial size=" + counters.size());
             keySet = counters.keySet();
             long nanoTime = System.nanoTime();
-            long nanoTimeout =  cleanIpsTimeout * NANOS_IN_MILLIS;
-            for(String ip: keySet) {
-                if(counters.get(ip).getLast() - nanoTime > nanoTimeout) {
+            long nanoTimeout = cleanIpsTimeout * NANOS_IN_MILLIS;
+            for (String ip : keySet) {
+                Long lastTime = counters.get(ip).getLatest();
+                if (lastTime == null || nanoTime - lastTime > nanoTimeout) {
                     counters.remove(ip);
                 }
             }
-            containerLog.warn("Cleaning IPs, final size=" + counters.size());
+            log.warn("Cleaning IPs, final size=" + counters.size());
         }
     }
 }

@@ -27,8 +27,8 @@ public class RequestCounter {
         return items.size();
     }
 
-    public long getLast() {
-        return items.getLast();
+    public Long getLatest() {
+        return items.peekLast();
     }
 
     private void trimOnce(Long time) {
