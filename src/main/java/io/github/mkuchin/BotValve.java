@@ -35,7 +35,7 @@ public class BotValve extends ValveBase {
     private long cleanIpsTimeout = 30 * 60 * MILLIS_IN_SEC;
 
     public BotValve() {
-        super();
+        super(true);
         reset();
     }
 
