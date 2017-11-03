@@ -51,7 +51,11 @@ public class BotValve extends ValveBase {
 
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
-        String ip = request.getRemoteAddr();
+        String ip = request.getHeader("X-Real-IP");
+        if (ip == null || ip.isEmpty()){
+            ip = request.getRemoteAddr();
+        }    
+       
         if (enabled && blocked.get(ip) != null) {
             deny(ip, request, response);
             return;
@@ -171,7 +175,8 @@ public class BotValve extends ValveBase {
     }
 
     private void deny(String ip, Request request, Response response) {
-        response.setStatus(HttpServletResponse.SC_EXPECTATION_FAILED);
+//         response.setStatus(HttpServletResponse.SC_EXPECTATION_FAILED);
+        response.setStatus(429); // Too Many Requests todo add Retry-After: 3600
     }
 
     public void setPeriod(int period) {
