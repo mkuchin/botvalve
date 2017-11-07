@@ -51,10 +51,11 @@ public class BotValve extends ValveBase {
 
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
-        String ip = request.getHeader("X-Real-IP");
-        if (ip == null || ip.isEmpty()){
-            ip = request.getRemoteAddr();
-        }    
+        String ip = request.getRemoteAddr();
+        //String ip = request.getHeader("X-Real-IP");
+        //if (ip == null || ip.isEmpty()){
+        //    ip = request.getRemoteAddr();
+        //}    
        
         if (enabled && blocked.get(ip) != null) {
             deny(ip, request, response);
