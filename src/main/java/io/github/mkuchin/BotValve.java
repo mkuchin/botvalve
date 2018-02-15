@@ -24,18 +24,21 @@ public class BotValve extends ValveBase {
     private static final int API_PREFIX_LEN = API_PREFIX.length();
     private ConcurrentHashMap<String, RequestCounter> counters;
     private ConcurrentHashMap<String, Long> blocked;
+    private ConcurrentHashMap<String, Long> white;
     private boolean enabled = true;
     private int period = 60;
     private TimeUnit unit = TimeUnit.SECONDS;
     private int expiry = 5 * 60 * MILLIS_IN_SEC;
+    private int expiryWhite = 1 * 60 * MILLIS_IN_SEC;
     private int threshold = 100;
     private String pushKey;
     private String pushTitle;
+    private String whiteUrl;
     private long lastClean;
     private long cleanIpsTimeout = 30 * 60 * MILLIS_IN_SEC;
 
     public BotValve() {
-        super(true);
+        super();
         reset();
     }
 
@@ -50,13 +53,28 @@ public class BotValve extends ValveBase {
     }
 
     @Override
+    public boolean isAsyncSupported() {
+        return super.isAsyncSupported();
+    }
+
+    @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
         String ip = request.getRemoteAddr();
-        if (enabled && blocked.get(ip) != null) {
+        if (enabled && blocked.containsKey(ip) && !white.containsKey(ip)) {
             deny(ip, request, response);
             return;
         }
-        if (request.getRequestURI().startsWith(API_PREFIX)) {
+
+        String requestURI = request.getRequestURI();
+        if(whiteUrl != null) {
+            if(requestURI.equals(whiteUrl)) {
+                handleWhiteIp(ip, response);
+                return;
+            }
+        }
+
+
+        if (requestURI.startsWith(API_PREFIX)) {
             handleApi(request, response);
             return;
         }
@@ -69,21 +87,33 @@ public class BotValve extends ValveBase {
             }
         }
         counter.hit();
-        if (counter.getSize() > threshold && !blocked.contains(ip)) {
-            pushNotification(ip);
+        if (counter.getSize() > threshold && !blocked.containsKey(ip)) {
+            boolean isWhite = white.containsKey(ip);
+            String message = "Blocked: " + ip + (isWhite ? " white" : "");
+            pushNotification(message);
             blocked.put(ip, System.currentTimeMillis());
-            log.error("Blocked: " + ip);
-            if (enabled)
+            log.error(message);
+            if (enabled) {
                 deny(ip, request, response);
+                return;
+            }
+
         }
         getNext().invoke(request, response);
     }
 
-    private void pushNotification(String ip) {
+    private void handleWhiteIp(String ip, Response response) throws IOException {
+        white.put(ip, System.currentTimeMillis());
+        PrintWriter out = new PrintWriter(response.getWriter());
+        out.println("ok");
+        out.flush();
+    }
+
+    private void pushNotification(String message) {
         if(pushKey != null) {
             HttpURLConnection con = null;
             try {
-                URL obj = new URL(String.format("https://api.simplepush.io/send/%s/%s/%s", pushKey, pushTitle, "Blocked: " + ip));
+                URL obj = new URL(String.format("https://api.simplepush.io/send/%s/%s/%s", pushKey, pushTitle, message));
                  con = (HttpURLConnection) obj.openConnection();
                 int responseCode = con.getResponseCode();
                 if(responseCode != HttpServletResponse.SC_OK)
@@ -105,8 +135,7 @@ public class BotValve extends ValveBase {
         log.debug("Api action: " + action);
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType("text/plain");
-        Writer writer = response.getWriter();
-        PrintWriter out = new PrintWriter(writer);
+        PrintWriter out = new PrintWriter(response.getWriter());
         out.println("botValve API");
         switch (action) {
             case "":
@@ -125,11 +154,15 @@ public class BotValve extends ValveBase {
                 out.println("ok");
                 break;
             case "status":
-                out.println("Blocked ips:");
-                long time = System.currentTimeMillis();
-                for (String ip : blocked.keySet()) {
-                    out.printf("%16s - %5s sec\n", ip, (time - blocked.get(ip)) / MILLIS_IN_SEC);
+                if(!blocked.isEmpty()) {
+                    out.println("Blocked ips:");
+                    long time = System.currentTimeMillis();
+                    for (String ip : blocked.keySet()) {
+                        boolean isWhite = white.containsKey(ip);
+                        out.printf("%16s - %1s %5s sec\n", ip, isWhite ? "w" : "", (time - blocked.get(ip)) / MILLIS_IN_SEC);
+                    }
                 }
+
                 PriorityQueue<Map.Entry<String, RequestCounter>> queue = new PriorityQueue<>(new Comparator<Map.Entry<String, RequestCounter>>() {
                     @Override
                     public int compare(Map.Entry<String, RequestCounter> o1, Map.Entry<String, RequestCounter> o2) {
@@ -137,6 +170,7 @@ public class BotValve extends ValveBase {
                     }
                 });
                 Set<Map.Entry<String, RequestCounter>> counterEntries = counters.entrySet();
+                out.println("white ips: " + white.size());
                 out.println("uniq ips: " + counterEntries.size());
                 queue.addAll(counterEntries);
                 out.println("Top ips:");
@@ -153,16 +187,17 @@ public class BotValve extends ValveBase {
                 break;
             */
             default:
-                writer.write("Unrecognized action");
+                out.println("Unrecognized action");
         }
 
-        writer.flush();
+        out.flush();
 
     }
 
     private void reset() {
         this.counters = new ConcurrentHashMap<>(10000, 0.9f, 4);
         this.blocked = new ConcurrentHashMap<>(10, 0.9f, 1);
+        this.white = new ConcurrentHashMap<>(10000, 0.9f, 4);
         this.lastClean = System.currentTimeMillis();
     }
 
@@ -206,6 +241,14 @@ public class BotValve extends ValveBase {
         this.pushTitle = pushTitle;
     }
 
+    public void setWhiteUrl(String whiteUrl) {
+        this.whiteUrl = whiteUrl;
+    }
+
+    public void setExpiryWhite(int expiryWhite) {
+        this.expiryWhite = expiryWhite;
+    }
+
     @Override
     public void backgroundProcess() {
         Set<String> keySet = blocked.keySet();
@@ -216,9 +259,19 @@ public class BotValve extends ValveBase {
                 blocked.remove(ip);
             }
         }
+
+        //clean white list
+        keySet = white.keySet();
+        for (String ip : keySet) {
+            if (time - white.get(ip) > expiryWhite) {
+                white.remove(ip);
+            }
+        }
+
+        //clean ip cache
         if (time - lastClean > cleanIpsTimeout) {
             lastClean = time;
-            log.warn("Cleaning IPs, initial size=" + counters.size());
+            int initialSize = counters.size();
             keySet = counters.keySet();
             long nanoTime = System.nanoTime();
             long nanoTimeout = cleanIpsTimeout * NANOS_IN_MILLIS;
@@ -228,7 +281,7 @@ public class BotValve extends ValveBase {
                     counters.remove(ip);
                 }
             }
-            log.warn("Cleaning IPs, final size=" + counters.size());
+            log.warn("Cleaning IPs, size: " + initialSize + " -> " + counters.size());
         }
     }
 }
