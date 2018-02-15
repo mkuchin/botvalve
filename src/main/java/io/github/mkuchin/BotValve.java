@@ -206,7 +206,8 @@ public class BotValve extends ValveBase {
     }
 
     private void deny(String ip, Request request, Response response) {
-        response.setStatus(HttpServletResponse.SC_EXPECTATION_FAILED);
+//        response.setStatus(HttpServletResponse.SC_EXPECTATION_FAILED);
+        response.setStatus(429); // Too Many Requests todo add Retry-After: 3600
     }
 
     public void setPeriod(int period) {
