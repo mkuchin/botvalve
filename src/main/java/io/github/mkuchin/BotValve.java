@@ -22,6 +22,7 @@ public class BotValve extends ValveBase {
     private static final int MILLIS_IN_SEC = 1_000;
     private static final String API_PREFIX = "/botvalve/";
     private static final int API_PREFIX_LEN = API_PREFIX.length();
+    private static final Set<String> WHITE_IPS = new HashSet<>();
     private ConcurrentHashMap<String, RequestCounter> counters;
     private ConcurrentHashMap<String, Long> blocked;
     private ConcurrentHashMap<String, Long> white;
@@ -60,6 +61,12 @@ public class BotValve extends ValveBase {
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
         String ip = request.getRemoteAddr();
+
+        if (WHITE_IPS.contains(ip)){
+            getNext().invoke(request, response);
+            return;
+        }
+
         if (enabled && blocked.containsKey(ip) && !white.containsKey(ip)) {
             deny(ip, request, response);
             return;
@@ -170,6 +177,7 @@ public class BotValve extends ValveBase {
                     }
                 });
                 Set<Map.Entry<String, RequestCounter>> counterEntries = counters.entrySet();
+                out.println("WHITE LIST: " + WHITE_IPS);
                 out.println("white ips: " + white.size());
                 out.println("uniq ips: " + counterEntries.size());
                 queue.addAll(counterEntries);
@@ -243,6 +251,16 @@ public class BotValve extends ValveBase {
     }
 
     public void setWhiteUrl(String whiteUrl) {
+        this.whiteUrl = whiteUrl;
+    }
+
+    public void setWhiteIps(String ips) {
+        String[] ipsArray= ips.split(",");
+        for (String s : ipsArray) {
+            if (s!=null && !s.isEmpty()){
+                WHITE_IPS.add(s.trim());
+            }
+        }
         this.whiteUrl = whiteUrl;
     }
 
